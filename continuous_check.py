@@ -100,15 +100,22 @@ def main():
                 time.sleep(120)
                 continue
 
+            SEUIL_ANTICIPATION = 60  # secondes avant la vraie disponibilité
+
             for site, secondes in timers.items():
-                if secondes == 0 and site not in deja_notifie:
-                    notifier(f"🗝️ Tu peux voter sur {site} !")
+                if secondes <= SEUIL_ANTICIPATION and site not in deja_notifie:
+                    notifier(f"🗝️ Tu peux bientôt voter sur {site} (dans ~1 min) !")
                     deja_notifie.add(site)
-                elif secondes > 0:
+                elif secondes > SEUIL_ANTICIPATION:
                     deja_notifie.discard(site)
 
-            restants = [s for s in timers.values() if s > 0]
-            attente = (min(restants) + 5) if restants else 600
+            # On réveille le script juste avant le seuil d'anticipation, pour ne pas
+            # attendre inutilement jusqu'à la disponibilité réelle (0).
+            restants = [
+                max(1, s - SEUIL_ANTICIPATION) for s in timers.values()
+                if s > SEUIL_ANTICIPATION
+            ]
+            attente = min(restants) if restants else 600
 
             # On ne dépasse jamais la marge de sécurité du job.
             temps_restant_job = DUREE_MAX - (time.monotonic() - debut)
