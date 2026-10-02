@@ -1,0 +1,28 @@
+name: Résumé quotidien du classement
+
+on:
+  schedule:
+    - cron: "0 20 * * *"   # tous les jours à 20h00 UTC (ajuste si besoin)
+  workflow_dispatch:
+
+jobs:
+  resume:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dépendances
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Envoyer le résumé
+        env:
+          PSEUDO: ${{ secrets.PSEUDO }}
+          TOPIC: ${{ secrets.TOPIC }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: python daily_summary.py
