@@ -6,11 +6,13 @@ de 6h imposée par GitHub (le workflow le relance automatiquement ensuite).
 
 Variables d'environnement attendues : PSEUDO, TOPIC
 """
+import math
 import os
 import re
 import time
 
 import requests
+from PIL import Image
 from playwright.sync_api import sync_playwright
 
 PSEUDO = os.environ["PSEUDO"]
@@ -80,6 +82,36 @@ def lire_timers(page):
     return resultats
 
 
+def rendre_plus_carre(chemin_image):
+    """Découpe une image longue et plate en tranches verticales empilées,
+    pour obtenir un format plus proche du carré, plus lisible sur mobile."""
+    img = Image.open(chemin_image).convert("RGB")
+    largeur, hauteur = img.size
+    if hauteur == 0:
+        return chemin_image
+
+    ratio = largeur / hauteur
+    nb_tranches = max(1, round(math.sqrt(ratio)))
+    if nb_tranches <= 1:
+        return chemin_image
+
+    largeur_tranche = largeur // nb_tranches
+    nouvelle_img = Image.new("RGB", (largeur_tranche, hauteur * nb_tranches), "white")
+
+    for i in range(nb_tranches):
+        x0 = i * largeur_tranche
+        x1 = largeur if i == nb_tranches - 1 else x0 + largeur_tranche
+        morceau = img.crop((x0, 0, x1, hauteur))
+        if morceau.width != largeur_tranche:
+            fond = Image.new("RGB", (largeur_tranche, hauteur), "white")
+            fond.paste(morceau, (0, 0))
+            morceau = fond
+        nouvelle_img.paste(morceau, (0, i * hauteur))
+
+    nouvelle_img.save(chemin_image)
+    return chemin_image
+
+
 def envoyer_discord(message, chemin_image):
     if not DISCORD_WEBHOOK:
         return
@@ -131,10 +163,12 @@ def lire_top3(page):
 
 
 def verifier_changements_top3(page, top3_precedent):
-    """Compare le top3 actuel au précédent, notifie sur Discord si quelqu'un
-    d'autre que PSEUDO a bougé, et renvoie le nouvel état à retenir."""
+    """Compare le top3 actuel au précédent, regroupe les changements détectés
+    (hors PSEUDO) en un seul message Discord avec l'évolution des votes,
+    et renvoie le nouvel état à retenir."""
     top3_actuel = lire_top3(page)
     nouvel_etat = {}
+    changements = []  # (position, nom, votes, evolution_texte, locator_ligne)
 
     for position, (nom, votes, ligne) in top3_actuel.items():
         nouvel_etat[position] = (nom, votes)
@@ -143,20 +177,66 @@ def verifier_changements_top3(page, top3_precedent):
             continue  # on ignore ses propres votes
 
         avant = top3_precedent.get(position)
-        a_change = avant is None or avant != (nom, votes)
 
-        if a_change and top3_precedent:  # pas d'alerte au tout premier passage
-            try:
-                ligne.screenshot(path="top3_change.png")
-                envoyer_discord(
-                    f"📊 Changement en position #{position} du classement : "
-                    f"**{nom}** ({votes} votes)",
-                    "top3_change.png",
-                )
-            except Exception as e:
-                print("Erreur capture top3 :", e, flush=True)
+        if not top3_precedent:
+            continue  # pas d'alerte au tout premier passage
+
+        if avant is None:
+            continue  # position pas encore vue, rien à comparer
+
+        nom_avant, votes_avant = avant
+
+        if nom != nom_avant:
+            # Nouvelle personne à cette position (elle entre dans le top 3).
+            changements.append((position, nom, votes, "🆕 nouvelle entrée", ligne))
+        elif votes != votes_avant and votes is not None and votes_avant is not None:
+            diff = votes - votes_avant
+            evolution = f"+{diff}" if diff > 0 else str(diff)
+            changements.append(
+                (position, nom, votes, f"{votes_avant} → {votes} ({evolution})", ligne)
+            )
+
+    if changements:
+        lignes_message = [
+            f"#{position} **{nom}** — {evolution}"
+            for position, nom, votes, evolution, _ in changements
+        ]
+        message = "📊 Changement(s) dans le top 3 :\n" + "\n".join(lignes_message)
+
+        # On illustre avec la capture de la première ligne concernée.
+        try:
+            _, _, _, _, premiere_ligne = changements[0]
+            premiere_ligne.screenshot(path="top3_change.png")
+            rendre_plus_carre("top3_change.png")
+            envoyer_discord(message, "top3_change.png")
+        except Exception as e:
+            print("Erreur capture top3 :", e, flush=True)
 
     return nouvel_etat
+
+
+def envoyer_resume_quotidien(page):
+    top3_actuel = lire_top3(page)
+    if not top3_actuel:
+        return
+
+    lignes = [
+        f"#{position} **{nom}** — {votes} votes"
+        for position, (nom, votes, _ligne) in sorted(top3_actuel.items())
+    ]
+    message = "📅 Résumé du jour — Top 3 du classement :\n" + "\n".join(lignes)
+
+    try:
+        conteneur = page.get_by_text("Top votes").first.locator(
+            "xpath=ancestor::*[3]"
+        )
+        conteneur.screenshot(path="resume_quotidien.png")
+        rendre_plus_carre("resume_quotidien.png")
+        envoyer_discord(message, "resume_quotidien.png")
+    except Exception as e:
+        print("Erreur capture résumé quotidien, envoi en texte seul :", e, flush=True)
+        if DISCORD_WEBHOOK:
+            requests.post(DISCORD_WEBHOOK, data={"content": message}, timeout=15)
 
 
 def main():
