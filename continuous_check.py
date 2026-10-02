@@ -6,7 +6,6 @@ de 6h imposée par GitHub (le workflow le relance automatiquement ensuite).
 
 Variables d'environnement attendues : PSEUDO, TOPIC
 """
-import math
 import os
 import re
 import time
@@ -83,30 +82,62 @@ def lire_timers(page):
 
 
 def rendre_plus_carre(chemin_image):
-    """Découpe une image longue et plate en tranches verticales empilées,
-    pour obtenir un format plus proche du carré, plus lisible sur mobile."""
+    """Repère les blocs de contenu réel (avatar+nom, votes...) dans une ligne
+    longue et plate, et les empile verticalement en ignorant les grandes
+    zones vides entre eux, pour un format plus compact et plus carré."""
     img = Image.open(chemin_image).convert("RGB")
     largeur, hauteur = img.size
-    if hauteur == 0:
+    if largeur == 0 or hauteur == 0:
         return chemin_image
 
-    ratio = largeur / hauteur
-    nb_tranches = max(1, round(math.sqrt(ratio)))
-    if nb_tranches <= 1:
-        return chemin_image
+    gris = img.convert("L")
+    seuil = 235  # en dessous de ce niveau de gris : considéré comme "contenu"
+    pixels = gris.load()
+    pas = max(1, hauteur // 40)  # échantillonnage pour rester rapide
 
-    largeur_tranche = largeur // nb_tranches
-    nouvelle_img = Image.new("RGB", (largeur_tranche, hauteur * nb_tranches), "white")
+    colonnes_actives = []
+    for x in range(largeur):
+        actif = any(pixels[x, y] < seuil for y in range(0, hauteur, pas))
+        colonnes_actives.append(actif)
 
-    for i in range(nb_tranches):
-        x0 = i * largeur_tranche
-        x1 = largeur if i == nb_tranches - 1 else x0 + largeur_tranche
+    # Regroupe les colonnes actives en segments (blocs de contenu).
+    segments = []
+    debut = None
+    for x, actif in enumerate(colonnes_actives):
+        if actif and debut is None:
+            debut = x
+        elif not actif and debut is not None:
+            segments.append((debut, x))
+            debut = None
+    if debut is not None:
+        segments.append((debut, largeur))
+
+    # Fusionne les segments séparés par un petit espace (bruit, pas un vrai vide).
+    ecart_min = max(15, largeur // 25)
+    fusionnes = []
+    for seg in segments:
+        if fusionnes and seg[0] - fusionnes[-1][1] < ecart_min:
+            fusionnes[-1] = (fusionnes[-1][0], seg[1])
+        else:
+            fusionnes.append(list(seg))
+
+    if len(fusionnes) < 2:
+        return chemin_image  # rien de notable à réorganiser
+
+    marge = 8
+    morceaux = []
+    largeur_max = 0
+    for x0, x1 in fusionnes:
+        x0 = max(0, x0 - marge)
+        x1 = min(largeur, x1 + marge)
         morceau = img.crop((x0, 0, x1, hauteur))
-        if morceau.width != largeur_tranche:
-            fond = Image.new("RGB", (largeur_tranche, hauteur), "white")
-            fond.paste(morceau, (0, 0))
-            morceau = fond
-        nouvelle_img.paste(morceau, (0, i * hauteur))
+        morceaux.append(morceau)
+        largeur_max = max(largeur_max, morceau.width)
+
+    nouvelle_img = Image.new("RGB", (largeur_max, hauteur * len(morceaux)), "white")
+    for i, morceau in enumerate(morceaux):
+        decalage_x = (largeur_max - morceau.width) // 2
+        nouvelle_img.paste(morceau, (decalage_x, i * hauteur))
 
     nouvelle_img.save(chemin_image)
     return chemin_image
