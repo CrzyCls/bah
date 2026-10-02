@@ -15,7 +15,10 @@ from playwright.sync_api import sync_playwright
 
 PSEUDO = os.environ["PSEUDO"]
 TOPIC = os.environ["TOPIC"]
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")  # optionnel
 URL = "https://pixelsmp.fr/vote"
+
+LABELS_TOP3 = ["Meilleur votant du mois", "Top 2", "Top 3"]
 
 # Marge de sécurité : on s'arrête bien avant les 6h max de GitHub (21600 s),
 # pour laisser le temps au prochain run de démarrer proprement.
@@ -77,9 +80,89 @@ def lire_timers(page):
     return resultats
 
 
+def envoyer_discord(message, chemin_image):
+    if not DISCORD_WEBHOOK:
+        return
+    try:
+        with open(chemin_image, "rb") as f:
+            requests.post(
+                DISCORD_WEBHOOK,
+                data={"content": message},
+                files={"file": ("top3.png", f, "image/png")},
+                timeout=15,
+            )
+    except Exception as e:
+        print("Erreur envoi Discord :", e, flush=True)
+
+
+def ligne_depuis_label(page, label):
+    """Remonte depuis le sous-titre (ex: 'Top 2') jusqu'au bloc qui contient
+    aussi le nombre de votes, pour avoir toute la ligne (nom + votes)."""
+    sous_titre = page.get_by_text(label, exact=True).first
+    if sous_titre.count() == 0:
+        return None
+    for niveau in range(1, 7):
+        candidat = sous_titre.locator(f"xpath=ancestor::*[{niveau}]")
+        try:
+            texte = candidat.inner_text()
+        except Exception:
+            continue
+        if "vote" in texte.lower():
+            return candidat
+    return None
+
+
+def lire_top3(page):
+    """Renvoie {1: (nom, votes, locator_ligne), 2: ..., 3: ...}."""
+    resultat = {}
+    for position, label in enumerate(LABELS_TOP3, start=1):
+        try:
+            ligne = ligne_depuis_label(page, label)
+            if ligne is None:
+                continue
+            texte = ligne.inner_text()
+            nom = texte.strip().split("\n")[0].strip()
+            votes_match = re.search(r"(\d+)\s*votes?", texte, re.IGNORECASE)
+            votes = int(votes_match.group(1)) if votes_match else None
+            resultat[position] = (nom, votes, ligne)
+        except Exception as e:
+            print(f"Erreur lecture top3 position {position} :", e, flush=True)
+    return resultat
+
+
+def verifier_changements_top3(page, top3_precedent):
+    """Compare le top3 actuel au précédent, notifie sur Discord si quelqu'un
+    d'autre que PSEUDO a bougé, et renvoie le nouvel état à retenir."""
+    top3_actuel = lire_top3(page)
+    nouvel_etat = {}
+
+    for position, (nom, votes, ligne) in top3_actuel.items():
+        nouvel_etat[position] = (nom, votes)
+
+        if nom.lower() == PSEUDO.lower():
+            continue  # on ignore ses propres votes
+
+        avant = top3_precedent.get(position)
+        a_change = avant is None or avant != (nom, votes)
+
+        if a_change and top3_precedent:  # pas d'alerte au tout premier passage
+            try:
+                ligne.screenshot(path="top3_change.png")
+                envoyer_discord(
+                    f"📊 Changement en position #{position} du classement : "
+                    f"**{nom}** ({votes} votes)",
+                    "top3_change.png",
+                )
+            except Exception as e:
+                print("Erreur capture top3 :", e, flush=True)
+
+    return nouvel_etat
+
+
 def main():
     debut = time.monotonic()
     deja_notifie = set()
+    top3_precedent = {}
 
     with sync_playwright() as p:
         navigateur = p.chromium.launch()
@@ -94,6 +177,11 @@ def main():
                 continue
 
             print("Timers :", timers, flush=True)
+
+            try:
+                top3_precedent = verifier_changements_top3(page, top3_precedent)
+            except Exception as e:
+                print("Erreur vérification top3 :", e, flush=True)
 
             if timers and all(v == 0 for v in timers.values()):
                 print("⚠️ Lecture suspecte (tout à 0 en même temps), on réessaie.", flush=True)
@@ -117,9 +205,10 @@ def main():
             ]
             attente = min(restants) if restants else 600
 
-            # On ne dépasse jamais la marge de sécurité du job.
+            # On ne dépasse jamais la marge de sécurité du job, et on plafonne
+            # à 5 min pour garder une vérification régulière du classement.
             temps_restant_job = DUREE_MAX - (time.monotonic() - debut)
-            attente = max(30, min(attente, temps_restant_job))
+            attente = max(30, min(attente, temps_restant_job, 300))
             time.sleep(attente)
 
         navigateur.close()
