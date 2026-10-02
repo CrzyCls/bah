@@ -30,6 +30,7 @@ jobs:
         env:
           PSEUDO: ${{ secrets.PSEUDO }}
           TOPIC: ${{ secrets.TOPIC }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python continuous_check.py
 
       - name: Garder la capture d'écran de debug (si présente)
